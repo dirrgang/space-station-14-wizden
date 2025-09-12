@@ -10,7 +10,10 @@ using Robust.Shared.Physics.Components;
 namespace Content.Server.NPC.HTN.PrimitiveTasks.Operators;
 
 /// <summary>
-/// Moves an NPC to the specified target key. Hands the actual steering off to NPCSystem.Steering
+/// Moves an NPC to the specified target key and hands the actual steering off to
+/// <see cref="NPCSteeringSystem"/>. If the steering system cannot find a path the
+/// operator will clear the target so the NPC can try something else rather than
+/// getting stuck on an unreachable goal.
 /// </summary>
 public sealed partial class MoveToOperator : HTNOperator, IHtnConditionalShutdown
 {
@@ -179,6 +182,7 @@ public sealed partial class MoveToOperator : HTNOperator, IHtnConditionalShutdow
         return steering.Status switch
         {
             SteeringStatus.InRange => HTNOperatorStatus.Finished,
+            // Steering failed to find a path to the target. Mark as failed so we can drop it in shutdown.
             SteeringStatus.NoPath => HTNOperatorStatus.Failed,
             SteeringStatus.Moving => HTNOperatorStatus.Continuing,
             _ => throw new ArgumentOutOfRangeException()
@@ -197,11 +201,26 @@ public sealed partial class MoveToOperator : HTNOperator, IHtnConditionalShutdow
         // OwnerCoordinates is only used in planning so dump it.
         blackboard.Remove<PathResultEvent>(PathfindKey);
 
-        if (RemoveKeyOnFinish)
+        var owner = blackboard.GetValue<EntityUid>(NPCBlackboard.Owner);
+
+        // Normally the target key is removed only when the operator finishes
+        // successfully. However, if steering reported "NoPath" then the target
+        // is unreachable and keeping it would cause the NPC to try again and
+        // again. Force-remove the target in that case so higher level logic can
+        // pick a new goal.
+        var removeTarget = RemoveKeyOnFinish;
+
+        if (_entManager.TryGetComponent<NPCSteeringComponent>(owner, out var steering) &&
+            steering.Status == SteeringStatus.NoPath)
+        {
+            removeTarget = true;
+        }
+
+        if (removeTarget)
         {
             blackboard.Remove<EntityCoordinates>(TargetKey);
         }
 
-        _steering.Unregister(blackboard.GetValue<EntityUid>(NPCBlackboard.Owner));
+        _steering.Unregister(owner);
     }
 }
